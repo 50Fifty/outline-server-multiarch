@@ -1,14 +1,36 @@
 name: Build
+
+permissions:
+  contents: read
+
 env:
-  PACKAGE_NAME: 'ghcr.io/seia-soto/shadowbox'
-  ARCH: 'linux/amd64,linux/arm64,linux/arm/v7,linux/arm/v6'
+  UPSTREAM_REPOSITORY: 'Jigsaw-Code/outline-server'
+  PACKAGE_NAME: 'ghcr.io/${{ github.repository_owner }}/shadowbox'
+  ARCH: 'linux/amd64,linux/arm64'
+
 on:
   push:
   schedule:
     - cron: '0 0 * * *'
+
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Run helper tests
+        run: |
+          bash -n build.sh
+          bash -n tests/build_sh_helpers_test.sh
+          bash -n tests/extract_tar_member_fixture_test.sh
+          bash tests/build_sh_helpers_test.sh
+          bash tests/extract_tar_member_fixture_test.sh
+
   version:
     runs-on: ubuntu-latest
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     outputs:
       local_tag: ${{steps.local.outputs.tag}}
       remote_tag: ${{steps.remote.outputs.tag}}
@@ -17,38 +39,53 @@ jobs:
       - name: Get remote version
         id: remote
         run: |
-          git clone https://github.com/Jigsaw-Code/outline-server.git outline-server
-          cd outline-server
-          echo "tag=$(git describe --tags --abbrev=0)" >> $GITHUB_OUTPUT
+          curl_args=(-fsSL)
+          if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+            curl_args+=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
+          fi
+          tag="$(curl "${curl_args[@]}" "https://api.github.com/repos/${{env.UPSTREAM_REPOSITORY}}/releases/latest" | jq -r '.tag_name')"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
       - name: Get local release
         id: local
         run: |
-          echo "tag=$(curl -sL "https://api.github.com/repos/${{github.repository}}/releases" | jq -r '[.[] | select(.name | startswith("latest-"))] | sort_by(.published_at)[-1].name')" >> $GITHUB_OUTPUT
+          curl_args=(-fsSL)
+          if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+            curl_args+=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
+          fi
+          tag="$(curl "${curl_args[@]}" "https://api.github.com/repos/${{github.repository}}/releases" | jq -r '[.[] | select(.name | startswith("latest-"))] | sort_by(.published_at)[-1].name // ""')"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
       - name: Test
         id: test
         run: |
           if [[ "latest-${{steps.remote.outputs.tag}}" != "${{steps.local.outputs.tag}}" ]];
           then
-            echo "latest=true" >> $GITHUB_OUTPUT
+            echo "latest=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "latest=false" >> "$GITHUB_OUTPUT"
           fi
   build_master:
-    needs: [version]
-    runs-on: ubuntu-20.04
+    needs: [test, version]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v2
-      - uses: actions/setup-node@v3
+        uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
-          node-version: 16
+          node-version: 18
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.21.x'
       - name: Setup QEMU
-        uses: docker/setup-qemu-action@v1
+        uses: docker/setup-qemu-action@v3
         with:
-          image: tonistiigi/binfmt:latest
           platforms: all
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v1
+        uses: docker/setup-buildx-action@v3
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@v1
+        uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{github.repository_owner}}
@@ -57,24 +94,29 @@ jobs:
         run: |
           bash ./build.sh "${{env.ARCH}}" "${{env.PACKAGE_NAME}}:master" "master"
   build_latest:
-    needs: [version]
-    runs-on: ubuntu-20.04
+    needs: [test, version]
+    runs-on: ubuntu-latest
     if: needs.version.outputs.is_latest_build_required == 'true'
+    permissions:
+      contents: write
+      packages: write
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v2
-      - uses: actions/setup-node@v3
+        uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
-          node-version: 16
+          node-version: 18
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.21.x'
       - name: Setup QEMU
-        uses: docker/setup-qemu-action@v1
+        uses: docker/setup-qemu-action@v3
         with:
-          image: tonistiigi/binfmt:latest
           platforms: all
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v1
+        uses: docker/setup-buildx-action@v3
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@v1
+        uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{github.repository_owner}}
@@ -83,14 +125,9 @@ jobs:
         run: |
           bash ./build.sh "${{env.ARCH}}" "${{env.PACKAGE_NAME}}:latest" "${{needs.version.outputs.remote_tag}}"
       - name: Conditional release
-        uses: actions/create-release@v1
         env:
           GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
-        with:
-          tag_name: "latest-${{needs.version.outputs.remote_tag}}"
-          release_name: "latest-${{needs.version.outputs.remote_tag}}"
-          body: |
-            This release is for identification use of CI script.
-            Please, read README to deploy this package.
-          draft: false
-          prerelease: false
+        run: |
+          gh release create "latest-${{needs.version.outputs.remote_tag}}" \
+            --title "latest-${{needs.version.outputs.remote_tag}}" \
+            --notes "This release is for identification use of CI script. Please, read README to deploy this package."

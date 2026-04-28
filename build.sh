@@ -1,132 +1,401 @@
-#!/bin/bash
-set -x
+#!/usr/bin/env bash
+set -euo pipefail
 
 : '
 # by HoJeong Go
+# updated by Jen Sean Foo
 
 Usage:
 
-    ./build.sh $arch $tag $checkpoint
+    ./build.sh $platforms $tag $checkpoint
 
-    -- Arguments:
+Arguments:
 
-    $arch {string} The arch to build, using docker platform style
-    $tag {string} The docker tag to use while building the image
-    $checkpoint {string} The git branch or tag to checkout on Jigsaw-Code/Outline-Server
+    $platforms   Comma-separated Docker platforms. Supported: linux/amd64,linux/arm64
+    $tag         Docker image tag to build, for example ghcr.io/example/shadowbox:latest
+    $checkpoint  Upstream Outline Server branch or tag. Use "latest" for the latest release.
 
-    -- Environments:
+Environment:
 
-    $AB_LEAVE_BASE_DIRECTORY {any} If it is not empty string, script will not clean working directory
+    AB_LEAVE_BASE_DIRECTORY  If non-empty, keep the upstream checkout in ./workspace/outline-server.
+    BUILD_OUTPUT             "push" (default) or "load". "load" supports one platform only.
+    UPSTREAM_REPOSITORY      Upstream repository, default Jigsaw-Code/outline-server.
 
 About:
 
-    This script builds Outline-Server docker buildx image
-    with specific arch by downloading compatible third_party
-    automatically.
+    This script builds the upstream Outline Server Shadowbox image for supported
+    platforms with Docker Buildx. The upstream source is patched only enough to
+    expose Docker Buildx flags from its Taskfile build.
 '
 
-readonly REPO_BASE="Jigsaw-Code/outline-server"
-readonly NS_BASE="outline-server"
+readonly ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly UPSTREAM_REPOSITORY="${UPSTREAM_REPOSITORY:-Jigsaw-Code/outline-server}"
+readonly BUILD_OUTPUT="${BUILD_OUTPUT:-push}"
 
-readonly REPO_SSS="Jigsaw-Code/outline-ss-server"
-readonly NS_SSS="outline-ss-server"
+PLATFORMS=""
+IMAGE_TAG=""
+CHECKPOINT=""
+PATCH_SET="release"
+REQUESTED_PLATFORMS=()
 
-readonly REPO_PROM="prometheus/prometheus"
-readonly NS_PROM="prometheus"
+TMP_DIR=""
+CHECKOUT_DIR=""
 
-TMP=$(mktemp -d)
-# Need to ARCH in build script
-ARCH=${1}
-TAG=${2}
-CHECKPOINT=${3}
-
-export DOCKER_PLATFORMS="${ARCH}"
-
-gh_releases() {
-    local REPO=${1}
-
-    echo $(
-        curl -sL "https://api.github.com/repos/${REPO}/releases" | \
-        jq -r '[.[] | select(.prerelease == false)][0]'
-    )
+cleanup() {
+  if [[ -n "${TMP_DIR}" ]]; then
+    rm -rf "${TMP_DIR}"
+  fi
 }
 
-gh_release_asset_url_by_arch() {
-    local REPO=${1} ARCH=${2}
-
-    echo $(
-        gh_releases "${REPO}" | \
-        jq -r "[.assets[] | select(.name | contains(\"${ARCH}\"))][0].browser_download_url"
-    )
+log() {
+  printf '==> %s\n' "$*"
 }
 
-unpack_archive_from_url() {
-    local NAME=${1} URL=${2} STRIP_LEVEL=${3}
-
-    mkdir -p "${TMP}/${NAME}"
-
-    curl -sL "${URL}" -o "${TMP}/${NAME}.archive"
-    tar -xf "${TMP}/${NAME}.archive" -C "${TMP}/${NAME}" --strip-components="${STRIP_LEVEL}"
+require_command() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "Required command not found: $1" >&2
+    exit 1
+  fi
 }
 
-remap_arch() {
-    local ARCH="${1}" AMD64="${2:-amd64}" ARM64="${3:-arm64}" ARMv7="${4:-armv7}" ARMv6="${5:-armv6}"
+check_tooling() {
+  local node_major
 
-    [[ "${ARCH}" == *"amd64"* ]] && echo "${AMD64}"
-    [[ "${ARCH}" == *"arm64"* ]] && echo "${ARM64}"
-    [[ "${ARCH}" == *"v7"* ]] && echo "${ARMv7}"
-    [[ "${ARCH}" == *"v6"* ]] && echo "${ARMv6}"
+  require_command curl
+  require_command docker
+  require_command git
+  require_command go
+  require_command jq
+  require_command node
+  require_command npm
+
+  node_major="$(node -p 'process.versions.node.split(".")[0]')"
+  if [[ "${node_major}" != "18" ]]; then
+    echo "Node.js 18.x is required by upstream Outline Server." >&2
+    echo "Current Node.js version: $(node --version)" >&2
+    exit 1
+  fi
 }
 
-# Clone outline-server
-[[ ! -d "./outline-server" ]] && git clone "https://github.com/${REPO_BASE}.git" "${NS_BASE}"
+latest_release_tag() {
+  local -a curl_args
+  curl_args=(-fsSL)
 
-# Go to repo and checkout to latest release
-cd "${NS_BASE}"
+  if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+    curl_args+=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
+  fi
 
-# Use patch latest
-if [[ "${CHECKPOINT}" == "latest" ]]; then
-    CHECKPOINT="$(git describe --tags --abbrev=0)"
+  curl "${curl_args[@]}" "https://api.github.com/repos/${UPSTREAM_REPOSITORY}/releases/latest" | jq -r '.tag_name'
+}
+
+platform_to_target_arch() {
+  case "$1" in
+    linux/amd64) echo "x86_64" ;;
+    linux/arm64)
+      if [[ "${PATCH_SET}" == "master" ]]; then
+        echo "aarch64"
+      else
+        echo "arm64"
+      fi
+      ;;
+    *)
+      echo "Unsupported platform: $1" >&2
+      echo "Supported platforms: linux/amd64, linux/arm64" >&2
+      return 1
+      ;;
+  esac
+}
+
+platform_suffix() {
+  case "$1" in
+    linux/amd64) echo "amd64" ;;
+    linux/arm64) echo "arm64" ;;
+    *) return 1 ;;
+  esac
+}
+
+reject_digest_image_ref() {
+  local image="$1"
+
+  if [[ "${image}" == *@* ]]; then
+    echo "Digest-qualified image refs cannot be used as build output tags: ${image}" >&2
+    return 1
+  fi
+}
+
+append_tag_suffix() {
+  local image="$1"
+  local suffix="$2"
+  local basename="${image##*/}"
+
+  reject_digest_image_ref "${image}" || return 1
+
+  if [[ "${basename}" == *":"* ]]; then
+    echo "${image}-${suffix}"
+  else
+    echo "${image}:${suffix}"
+  fi
+}
+
+normalize_image_ref() {
+  local image="$1"
+  local basename
+  local digest=""
+  local name
+  local repository
+  local tag=""
+
+  name="${image}"
+  if [[ "${name}" == *@* ]]; then
+    digest="@${name#*@}"
+    name="${name%@*}"
+  fi
+
+  basename="${name##*/}"
+  repository="${name}"
+  if [[ "${basename}" == *":"* ]]; then
+    tag=":${basename##*:}"
+    repository="${name%${tag}}"
+  fi
+
+  printf '%s%s%s\n' "$(printf '%s' "${repository}" | tr '[:upper:]' '[:lower:]')" "${tag}" "${digest}"
+}
+
+trim_whitespace() {
+  local value="$1"
+
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s\n' "${value}"
+}
+
+split_platforms() {
+  local raw="$1"
+  local old_ifs="${IFS}"
+  local -a raw_platforms=()
+  local platform
+
+  REQUESTED_PLATFORMS=()
+  if [[ "${raw}" =~ (^|,)[[:space:]]*(,|$) ]]; then
+    echo "Empty platform entry in platform list: ${raw}" >&2
+    return 1
+  fi
+
+  IFS=,
+  read -r -a raw_platforms <<<"${raw}"
+  IFS="${old_ifs}"
+
+  for platform in "${raw_platforms[@]}"; do
+    platform="$(trim_whitespace "${platform}")"
+    REQUESTED_PLATFORMS+=("${platform}")
+  done
+}
+
+checkout_target_for_checkpoint() {
+  local checkpoint="$1"
+
+  if git -C "${CHECKOUT_DIR}" show-ref --verify --quiet "refs/remotes/origin/${checkpoint}"; then
+    printf 'origin/%s\n' "${checkpoint}"
+  else
+    printf '%s\n' "${checkpoint}"
+  fi
+}
+
+prepare_checkout() {
+  local checkout_target
+
+  if [[ -n "${AB_LEAVE_BASE_DIRECTORY:-}" ]]; then
+    CHECKOUT_DIR="${ROOT_DIR}/workspace/outline-server"
+    mkdir -p "${ROOT_DIR}/workspace"
+  fi
+
+  if [[ ! -d "${CHECKOUT_DIR}/.git" ]]; then
+    log "Cloning ${UPSTREAM_REPOSITORY}"
+    git clone "https://github.com/${UPSTREAM_REPOSITORY}.git" "${CHECKOUT_DIR}"
+  else
+    if [[ -n "$(git -C "${CHECKOUT_DIR}" status --porcelain)" ]]; then
+      echo "Upstream checkout has local changes: ${CHECKOUT_DIR}" >&2
+      echo "Clean it or unset AB_LEAVE_BASE_DIRECTORY to use a temporary checkout." >&2
+      exit 1
+    fi
+    log "Fetching ${UPSTREAM_REPOSITORY}"
+    git -C "${CHECKOUT_DIR}" fetch --tags --prune origin
+  fi
+
+  if [[ "${CHECKPOINT}" == "latest" ]]; then
+    CHECKPOINT="$(latest_release_tag)"
+  fi
+  if [[ "${CHECKPOINT}" == "master" ]]; then
+    PATCH_SET="master"
+  fi
+
+  checkout_target="$(checkout_target_for_checkpoint "${CHECKPOINT}")"
+  log "Checking out ${checkout_target}"
+  git -C "${CHECKOUT_DIR}" checkout --detach "${checkout_target}"
+}
+
+apply_patches() {
+  local patch
+  local patch_dir="${ROOT_DIR}/patches/${PATCH_SET}"
+  local nullglob_was_set=0
+  local -a patches=()
+
+  if [[ ! -d "${patch_dir}" ]]; then
+    echo "Patch directory not found: ${patch_dir}" >&2
+    exit 1
+  fi
+
+  if shopt -q nullglob; then
+    nullglob_was_set=1
+  else
+    shopt -s nullglob
+  fi
+  patches=("${patch_dir}"/*.patch)
+  if [[ "${nullglob_was_set}" -eq 0 ]]; then
+    shopt -u nullglob
+  fi
+
+  if [[ "${#patches[@]}" -eq 0 ]]; then
+    echo "No patch files found in ${patch_dir}" >&2
+    exit 1
+  fi
+
+  for patch in "${patches[@]}"; do
+    log "Applying ${patch##*/}"
+    git -C "${CHECKOUT_DIR}" apply "${patch}"
+  done
+}
+
+install_dependencies() {
+  log "Installing upstream dependencies"
+  (
+    cd "${CHECKOUT_DIR}"
+    npm ci
+  )
+}
+
+build_version() {
+  if [[ "${CHECKPOINT}" == "master" ]]; then
+    printf 'master-%s' "$(git -C "${CHECKOUT_DIR}" rev-parse --short HEAD)"
+  else
+    printf '%s' "${CHECKPOINT}"
+  fi
+}
+
+build_one_platform() {
+  local platform="$1"
+  local image="$2"
+  local version="$3"
+  local build_args
+  local target_arch
+  local build_output_arg
+
+  target_arch="$(platform_to_target_arch "${platform}")"
+  case "${BUILD_OUTPUT}" in
+    push) build_output_arg="--push" ;;
+    load) build_output_arg="--load" ;;
+    *)
+      echo "Unsupported BUILD_OUTPUT: ${BUILD_OUTPUT}" >&2
+      echo "Supported values: push, load" >&2
+      exit 1
+      ;;
+  esac
+  if grep -q "DOCKER_PLATFORM" "${CHECKOUT_DIR}/src/shadowbox/Taskfile.yml"; then
+    build_args="${build_output_arg}"
+  else
+    build_args="--platform=${platform} ${build_output_arg}"
+  fi
+
+  log "Building ${image} for ${platform}"
+  (
+    cd "${CHECKOUT_DIR}"
+    ./task shadowbox:docker:build \
+      IMAGE_NAME="${image}" \
+      IMAGE_VERSION="${version}" \
+      TARGET_ARCH="${target_arch}" \
+      DOCKER_BUILD_COMMAND="buildx build" \
+      DOCKER_BUILD_ARGS="${build_args}" \
+      DOCKER_CONTENT_TRUST=0
+  )
+}
+
+create_manifest() {
+  local image="$1"
+  shift
+
+  log "Creating manifest ${image}"
+  docker buildx imagetools create -t "${image}" "$@"
+}
+
+main() {
+  if [[ "$#" -ne 3 ]]; then
+    echo "usage: ./build.sh <platforms> <tag> <checkpoint>" >&2
+    exit 1
+  fi
+
+  PLATFORMS="$1"
+  IMAGE_TAG="$2"
+  CHECKPOINT="$3"
+  PATCH_SET="release"
+  TMP_DIR="$(mktemp -d)"
+  CHECKOUT_DIR="${TMP_DIR}/outline-server"
+  trap cleanup EXIT
+
+  local version
+  local platform
+  local suffix
+  local arch_image
+  local arch_images=()
+  local normalized_image_tag
+
+  split_platforms "${PLATFORMS}"
+  if [[ "${#REQUESTED_PLATFORMS[@]}" -eq 0 ]]; then
+    echo "At least one platform is required." >&2
+    exit 1
+  fi
+  if [[ "${BUILD_OUTPUT}" == "load" && "${#REQUESTED_PLATFORMS[@]}" -ne 1 ]]; then
+    echo "BUILD_OUTPUT=load supports exactly one platform." >&2
+    exit 1
+  fi
+  case "${BUILD_OUTPUT}" in
+    push | load) ;;
+    *)
+      echo "Unsupported BUILD_OUTPUT: ${BUILD_OUTPUT}" >&2
+      echo "Supported values: push, load" >&2
+      exit 1
+      ;;
+  esac
+  for platform in "${REQUESTED_PLATFORMS[@]}"; do
+    platform_to_target_arch "${platform}" >/dev/null
+  done
+  reject_digest_image_ref "${IMAGE_TAG}" || exit 1
+
+  check_tooling
+  normalized_image_tag="$(normalize_image_ref "${IMAGE_TAG}")"
+  if [[ "${normalized_image_tag}" != "${IMAGE_TAG}" ]]; then
+    log "Normalizing image repository to lowercase: ${normalized_image_tag}"
+    IMAGE_TAG="${normalized_image_tag}"
+  fi
+  prepare_checkout
+  apply_patches
+  install_dependencies
+  version="$(build_version)"
+
+  if [[ "${BUILD_OUTPUT}" == "load" ]]; then
+    build_one_platform "${REQUESTED_PLATFORMS[0]}" "${IMAGE_TAG}" "${version}"
+    return
+  fi
+
+  for platform in "${REQUESTED_PLATFORMS[@]}"; do
+    suffix="$(platform_suffix "${platform}")"
+    arch_image="$(append_tag_suffix "${IMAGE_TAG}" "${suffix}")"
+    build_one_platform "${platform}" "${arch_image}" "${version}"
+    arch_images+=("${arch_image}")
+  done
+
+  create_manifest "${IMAGE_TAG}" "${arch_images[@]}"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
 fi
-
-git checkout "${CHECKPOINT}"
-
-# Multi arch build
-for C_ARCH in ${ARCH//,/ }
-do
-    # Download outline-ss-server
-    ARCH_SSS="$(remap_arch "${C_ARCH}" x86_64 arm64 armv7 armv6)"
-    RES_SSS="$(gh_release_asset_url_by_arch "${REPO_SSS}" "linux_${ARCH_SSS}")"
-
-    unpack_archive_from_url "${NS_SSS}.${ARCH_SSS}" "${RES_SSS}" "0"
-
-    mkdir -p "third_parties/${C_ARCH}/outline-ss-server"
-    mv "${TMP}/${NS_SSS}.${ARCH_SSS}/outline-ss-server" "third_parties/${C_ARCH}/outline-ss-server/"
-
-    # Download prometheus
-    ARCH_PROM="$(remap_arch "${C_ARCH}" amd64 arm64 armv7 armv6)"
-    RES_PROM="$(gh_release_asset_url_by_arch "${REPO_PROM}" "linux-${ARCH_PROM}")"
-
-    unpack_archive_from_url "${NS_PROM}.${ARCH_PROM}" "${RES_PROM}" "1"
-
-    mkdir -p "third_parties/${C_ARCH}/prometheus"
-    mv "${TMP}/${NS_PROM}.${ARCH_PROM}/prometheus" "third_parties/${C_ARCH}/prometheus/"
-done
-
-# Apply patches
-for FILE in ../patches/*.patch; do
-    [[ -e "${FILE}" ]] || continue;
-    git apply "${FILE}";
-done;
-
-# Build docker-image
-export SB_IMAGE="${TAG}"
-export NODE_IMAGE="node:16-alpine"
-
-npm run action shadowbox/docker/build
-
-# Clean-up
-cd ..
-
-rm -rf "${TMP}"
-[[ "${AB_LEAVE_BASE_DIRECTORY}" == "" ]] && rm -rf "${NS_BASE}"

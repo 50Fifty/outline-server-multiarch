@@ -1,142 +1,105 @@
 # outline-server-multiarch
 
-The multi-arch distribution of [Jigsaw's Outline-Server](https://github.com/Jigsaw-Code/outline-server) project for AArch servers.
+Multi-arch Docker builds for [Jigsaw's Outline Server](https://github.com/Jigsaw-Code/outline-server).
 
-| Version | Update Interval                              | Target          | Supported OS/Arch                                    |
-|---------|----------------------------------------------|-----------------|------------------------------------------------------|
-| master  | daily                                        | upstream/master | linux/amd64, linux/arm64, linux/arm/v7, linux/arm/v6 |
-| latest  | checked daily, released as upstream tags     | Latest tag      | linux/amd64, linux/arm64, linux/arm/v7, linux/arm/v6 |
-| release | checked daily, not more updated (legacy)     | v1.9 or lower   | linux/amd64, linux/arm64, linux/arm/v7, linux/arm/v6 |
+This repository builds the upstream Shadowbox server image for the architectures supported by the current upstream build system.
+
+| Image tag | Update interval                                         | Upstream target        | Supported OS/Arch        |
+|-----------|---------------------------------------------------------|------------------------|--------------------------|
+| master    | on push and daily at 00:00 UTC                          | upstream `master`      | linux/amd64, linux/arm64 |
+| latest    | checked on push and daily at 00:00 UTC; rebuilt on new upstream releases | latest upstream release | linux/amd64, linux/arm64 |
+
+The `latest` build follows the latest non-prerelease upstream Outline Server release. At the time this repository was updated, the latest upstream release was `server-v1.12.3`.
 
 ## Usage
 
-To install outline-server on your server using this docker image, paste following code before install:
+To install Outline Server with an image built from this repository, set `SB_IMAGE` before running the official installer.
 
 ```bash
-# master release, updated daily (might fail sometime)
-export SB_IMAGE="ghcr.io/seia-soto/shadowbox:master"
+export SB_IMAGE="ghcr.io/50fifty/shadowbox:latest"
 
-# stable release, NOT MORE UPDATED (It is for outline-server v1.9 or lower, use `latest` instead)
-export SB_IMAGE="ghcr.io/seia-soto/shadowbox:release"
-
-# latest release, updated irregularly
-export SB_IMAGE="ghcr.io/seia-soto/shadowbox:latest"
-
-# run install script
-curl -sL "https://raw.githubusercontent.com/Jigsaw-Code/outline-server/master/src/server_manager/install_scripts/install_server.sh" | sed '/local MACHINE_TYPE/,/fi/{d}' | bash
+sudo env SB_IMAGE="${SB_IMAGE}" bash -s -- \
+  --hostname=<ip-address> \
+  --keys-port=<access-key-port> \
+  --api-port=<api-port> < <(
+    curl -sL "https://raw.githubusercontent.com/Jigsaw-Code/outline-server/master/src/server_manager/install_scripts/install_server.sh" \
+      | sed '/local MACHINE_TYPE/,/fi/{d}'
+)
 ```
+
+The `sed` command removes the official installer's x86_64 host check so the installer can run on ARM hosts. The image itself still needs to support the host architecture.
 
 ## Development
 
-### Patching
-
-There're Makefile in this repository and contains some useful commands for development, but you can continue only with `git diff` command.
-
-Use `make help` to print help script.
-
-Starting with `make clone-upstream apply-patches` would be help.
-
-### Local build
-
-> The build script uses Docker Buildx and you cannot publish the output image directly to the Docker daemon.
-
-To build image locally, you can use following command with prepared environment:
-
-- For **single-arch** build, you just need to install:
-  - `jq`
-  - `git`
-  - `curl`
-  - `tar`
-  - `npm` from Node.JS (use v12 for `latest` build, otherwise use v16)
-  - Docker with Buildx and BuildKit support
-- For **multi-arch** build, you also need to install:
-  - QEMU emulator for cross-platform build
+Use `make help` to list patching helpers.
 
 ```bash
-# clone this repo
-git clone https://github.com/seia-soto/outline-server-multiarch.git
-
-# go to repo
-cd outline-server-multiarch
-
-: '
-# by HoJeong Go
-
-Usage:
-
-    ./build.sh $arch $tag $checkpoint
-
-    -- Arguments:
-
-    $arch {string} The arch to build, using docker platform style
-    $tag {string} The docker tag to use while building the image
-    $checkpoint {string} The git branch or tag to checkout on Jigsaw-Code/Outline-Server
-
-    -- Environments:
-
-    $AB_LEAVE_BASE_DIRECTORY {any} If it is not empty string, script will not clean working directory
-
-About:
-
-    This script builds Outline-Server docker buildx image
-    with specific arch by downloading compatible third_party
-    automatically.
-'
-
-# set local image name to use
-export SB_IMAGE="shadowbox-local"
-
-PLATFORM="linux/amd64" # use one of linux/amd64,linux/arm64,linux/arm/v7,linux/arm/v6, or all
-CHECKPOINT="latest" # use latest for latest tag or `master`
-
-# build latest, use false for use_legacy_install if you're building master branch
-bash ./build.sh "${PLATFORM}" "${SB_IMAGE}" "${CHECKPOINT}"
-
-# run install script
-curl -sL "https://raw.githubusercontent.com/Jigsaw-Code/outline-server/master/src/server_manager/install_scripts/install_server.sh" | sed '/local MACHINE_TYPE/,/fi/{d}' | bash
+make clone-upstream
+make apply-patches
+make apply-patches PATCH_SET=master
 ```
+
+The build script clones the upstream Outline Server repository, checks out the requested branch or tag, applies patches from `patches/release/` or `patches/master/`, installs upstream dependencies, and builds the Shadowbox Docker image through upstream's Taskfile.
+
+### Local Build
+
+Requirements:
+
+- `git`
+- `curl`
+- `jq`
+- Node.js 18 with `npm`
+- Go 1.21 or newer
+- Docker with Buildx and BuildKit support
+- QEMU/binfmt support for cross-architecture Docker builds
+
+Build and load one local image:
+
+```bash
+BUILD_OUTPUT=load bash ./build.sh \
+  "linux/amd64" \
+  "shadowbox-local:server-v1.12.3" \
+  "server-v1.12.3"
+```
+
+Build and push a multi-arch image:
+
+```bash
+bash ./build.sh \
+  "linux/amd64,linux/arm64" \
+  "ghcr.io/<repo-owner>/shadowbox:latest" \
+  "latest"
+```
+
+Replace `<repo-owner>` with the lowercase GHCR namespace you can push to. For this repository's published package, that namespace is `50fifty`.
+
+`BUILD_OUTPUT=push` is the default. It builds per-architecture temporary tags and then creates the final multi-arch manifest tag.
+
+### Supported Platforms
+
+Only `linux/amd64` and `linux/arm64` are supported by this update.
+
+Older versions of this repository advertised `linux/arm/v7` and `linux/arm/v6`, but upstream Outline Server now builds Shadowbox through a Taskfile/Go/Docker path that only has first-class settings for x86_64 and arm64. Restoring 32-bit ARM support would require additional upstream patches for Node base images, Prometheus artifacts, Go `GOARM` handling, and CI coverage.
 
 ### Troubleshooting
 
 #### `Unsupported machine type: ${MACHINE_TYPE}. Please run this script on a x86_64 machine.`
 
-You can use `sed '/local MACHINE_TYPE/,/fi/{d}'` to remove lines.
+Pipe the official installer through the documented `sed` command:
 
 ```bash
-curl -sL "https://raw.githubusercontent.com/Jigsaw-Code/outline-server/master/src/server_manager/install_scripts/install_server.sh" | sed '/local MACHINE_TYPE/,/fi/{d}' | bash
+export SB_IMAGE="ghcr.io/50fifty/shadowbox:latest"
+
+sudo env SB_IMAGE="${SB_IMAGE}" bash -s -- < <(
+  curl -sL "https://raw.githubusercontent.com/Jigsaw-Code/outline-server/master/src/server_manager/install_scripts/install_server.sh" \
+    | sed '/local MACHINE_TYPE/,/fi/{d}'
+)
 ```
 
-# LICENSE
+## Attribution and License
 
-This repository contains, modified and uses the hard work by Outline-Server Authors.
-The following files are originally from Outline-Server Authors and modified for personal use.
+This repository contains and modifies work by the Outline Server authors.
 
-- `extra/scripts/build.action.sh`
+The patches in `patches/` modify upstream `src/shadowbox/Taskfile.yml` so this repository can pass Docker Buildx flags into the upstream Docker build task.
 
-Also, the build script which named `/build.sh` will clone the Outline-Server repository and modify for personal use.
-
-Other files which created by HoJeong Go (a.k.a Seia-Soto) has been licensed with [MIT License](./LICENSE).
-
-```
-MIT License Copyright 2022-2023 HoJeong Go
-
-Permission is hereby granted, free of
-charge, to any person obtaining a copy of this software and associated
-documentation files (the "Software"), to deal in the Software without
-restriction, including without limitation the rights to use, copy, modify, merge,
-publish, distribute, sublicense, and/or sell copies of the Software, and to
-permit persons to whom the Software is furnished to do so, subject to the
-following conditions:
-
-The above copyright notice and this permission notice
-(including the next paragraph) shall be included in all copies or substantial
-portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
-ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
-MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO
-EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR
-OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-THE SOFTWARE.
-```
+This project was originally created in [seia-soto/outline-server-multiarch](https://github.com/seia-soto/outline-server-multiarch) by [seia-soto](https://github.com/seia-soto), as a multi-architecture distribution of Outline Server for ARM servers; those original project files are licensed under the [MIT License](./LICENSE).
