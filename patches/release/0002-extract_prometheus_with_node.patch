@@ -1,0 +1,272 @@
+diff --git a/src/build/extract_tar_member.mjs b/src/build/extract_tar_member.mjs
+new file mode 100644
+index 0000000..fb3f536
+--- /dev/null
++++ b/src/build/extract_tar_member.mjs
+@@ -0,0 +1,249 @@
++import {createHash} from 'node:crypto';
++import {createReadStream, createWriteStream} from 'node:fs';
++import {mkdir, rename, rm} from 'node:fs/promises';
++import {dirname} from 'node:path';
++import {createGunzip} from 'node:zlib';
++
++const [archive, out, suffix, expectedSha256] = process.argv.slice(2);
++if (!archive || !out || !suffix) {
++  throw new Error('usage: node extract_tar_member.mjs <archive> <out> <suffix> [sha256]');
++}
++const tmpOut = `${out}.tmp-${process.pid}`;
++
++function readString(buffer, start, end) {
++  return buffer.toString('utf8', start, end).replace(/\0.*$/, '');
++}
++
++function readTarSize(header) {
++  const raw = readString(header, 124, 136).trim();
++  return raw ? parseInt(raw, 8) : 0;
++}
++
++function tarEntryName(header) {
++  const name = readString(header, 0, 100);
++  const prefix = readString(header, 345, 500);
++  return prefix ? `${prefix}/${name}` : name;
++}
++
++function isZeroBlock(header) {
++  return header.every(byte => byte === 0);
++}
++
++class ChunkReader {
++  constructor() {
++    this.chunks = [];
++    this.offset = 0;
++    this.length = 0;
++  }
++
++  push(chunk) {
++    if (chunk.length === 0) {
++      return;
++    }
++    this.chunks.push(chunk);
++    this.length += chunk.length;
++  }
++
++  take(size) {
++    if (this.length < size) {
++      return null;
++    }
++    const result = Buffer.allocUnsafe(size);
++    let written = 0;
++    while (written < size) {
++      const chunk = this.chunks[0];
++      const available = chunk.length - this.offset;
++      const byteCount = Math.min(size - written, available);
++      chunk.copy(result, written, this.offset, this.offset + byteCount);
++      written += byteCount;
++      this.offset += byteCount;
++      this.length -= byteCount;
++      if (this.offset === chunk.length) {
++        this.chunks.shift();
++        this.offset = 0;
++      }
++    }
++    return result;
++  }
++
++  discard(size) {
++    if (this.length < size) {
++      return false;
++    }
++    let remaining = size;
++    while (remaining > 0) {
++      const chunk = this.chunks[0];
++      const available = chunk.length - this.offset;
++      const byteCount = Math.min(remaining, available);
++      remaining -= byteCount;
++      this.offset += byteCount;
++      this.length -= byteCount;
++      if (this.offset === chunk.length) {
++        this.chunks.shift();
++        this.offset = 0;
++      }
++    }
++    return true;
++  }
++
++  clear() {
++    this.chunks = [];
++    this.offset = 0;
++    this.length = 0;
++  }
++}
++
++async function waitForWriterEvent(stream, event, getWriterError) {
++  const writerError = getWriterError();
++  if (writerError) {
++    throw writerError;
++  }
++  await new Promise((resolve, reject) => {
++    const cleanup = () => {
++      stream.off(event, onEvent);
++      stream.off('error', onError);
++    };
++    const onEvent = () => {
++      cleanup();
++      resolve();
++    };
++    const onError = error => {
++      cleanup();
++      reject(error);
++    };
++    stream.once(event, onEvent);
++    stream.once('error', onError);
++  });
++}
++
++async function writeBodyChunk(stream, chunk, getWriterError) {
++  const writerError = getWriterError();
++  if (writerError) {
++    throw writerError;
++  }
++  if (!stream.write(chunk)) {
++    await waitForWriterEvent(stream, 'drain', getWriterError);
++  }
++}
++
++const reader = new ChunkReader();
++let current = null;
++let found = false;
++let finishedTar = false;
++let writer = null;
++let writerError = null;
++const sha256 = createHash('sha256');
++const source = createReadStream(archive);
++const gunzip = createGunzip();
++let sourceError = null;
++source.on('data', chunk => sha256.update(chunk));
++source.on('error', error => {
++  sourceError = error;
++  gunzip.destroy(error);
++});
++source.pipe(gunzip);
++
++try {
++  for await (const chunk of gunzip) {
++    if (finishedTar) {
++      continue;
++    }
++    reader.push(chunk);
++
++    while (reader.length > 0) {
++      if (!current) {
++        const header = reader.take(512);
++        if (!header) {
++          break;
++        }
++        if (isZeroBlock(header)) {
++          finishedTar = true;
++          reader.clear();
++          break;
++        }
++
++        const name = tarEntryName(header);
++        const type = readString(header, 156, 157);
++        const size = readTarSize(header);
++        const paddedSize = Math.ceil(size / 512) * 512;
++        const shouldExtract = !found && (type === '' || type === '0') && name.endsWith(suffix);
++        if (shouldExtract) {
++          await mkdir(dirname(out), {recursive: true});
++          writer = createWriteStream(tmpOut, {mode: 0o755});
++          writer.on('error', error => {
++            writerError = error;
++          });
++          found = true;
++        }
++        current = {
++          remaining: size,
++          padding: paddedSize - size,
++          writer: shouldExtract ? writer : null,
++        };
++      }
++
++      if (current.remaining > 0) {
++        const byteCount = Math.min(current.remaining, reader.length);
++        if (byteCount === 0) {
++          break;
++        }
++        const bodyChunk = reader.take(byteCount);
++        if (current.writer) {
++          await writeBodyChunk(current.writer, bodyChunk, () => writerError);
++        }
++        current.remaining -= byteCount;
++        if (current.remaining > 0) {
++          break;
++        }
++      }
++
++      if (current.padding > 0) {
++        const byteCount = Math.min(current.padding, reader.length);
++        if (byteCount === 0) {
++          break;
++        }
++        reader.discard(byteCount);
++        current.padding -= byteCount;
++        if (current.padding > 0) {
++          break;
++        }
++      }
++
++      if (current.writer) {
++        current.writer.end();
++        await waitForWriterEvent(current.writer, 'close', () => writerError);
++      }
++      current = null;
++    }
++  }
++
++  if (sourceError) {
++    throw sourceError;
++  }
++  if (current) {
++    throw new Error('Truncated tar archive');
++  }
++  if (!found) {
++    throw new Error(`No archive member ends with ${suffix}`);
++  }
++  const actualSha256 = sha256.digest('hex');
++  if (expectedSha256 && actualSha256 !== expectedSha256) {
++    throw new Error(`Expected SHA-256 ${expectedSha256}, got ${actualSha256}`);
++  }
++  if (writerError) {
++    throw writerError;
++  }
++  await rename(tmpOut, out);
++} catch (error) {
++  if (!source.destroyed) {
++    source.destroy();
++  }
++  if (!gunzip.destroyed) {
++    gunzip.destroy();
++  }
++  if (writer && !writer.closed) {
++    writer.destroy();
++  }
++  await rm(tmpOut, {force: true});
++  throw error;
++}
+diff --git a/third_party/Taskfile.yml b/third_party/Taskfile.yml
+index 3a5911c..be6aa96 100644
+--- a/third_party/Taskfile.yml
++++ b/third_party/Taskfile.yml
+@@ -31,10 +31,10 @@ tasks:
+       - {sh: "[[ '{{.GOOS}}' =~ 'linux|darwin' ]]", msg: "invalid GOOS {{.GOOS}}"}
+       - {sh: "[[ '{{.GOARCH}}' =~ 'amd64|arm64' ]]", msg: "invalid GOARCH {{.GOARCH}}"}
+     cmds:
+-      - node '{{joinPath .ROOT_DIR "src/build/download_file.mjs"}}' --url='https://github.com/prometheus/prometheus/releases/download/v{{.VERSION}}/prometheus-{{.VERSION}}.{{.GOOS}}-{{.GOARCH}}.tar.gz' --out='{{.TEMPFILE}}' --sha256='{{.SHA256}}'
++      - curl -fsSL --retry 3 -o '{{.TEMPFILE}}' 'https://github.com/prometheus/prometheus/releases/download/v{{.VERSION}}/prometheus-{{.VERSION}}.{{.GOOS}}-{{.GOARCH}}.tar.gz'
+       - defer: rm -f '{{.TEMPFILE}}'
+       - mkdir -p '{{.TARGET_DIR}}'
+-      - tar -zx -f '{{.TEMPFILE}}' --strip-components=1 -C '{{.TARGET_DIR}}' 'prometheus-{{.VERSION}}.{{.GOOS}}-{{.GOARCH}}/prometheus'
++      - node '{{joinPath .ROOT_DIR "src/build/extract_tar_member.mjs"}}' '{{.TEMPFILE}}' '{{.TARGET}}' '/prometheus' '{{.SHA256}}'
+       - chmod +x '{{.TARGET}}'
+ 
+   prometheus:copy-*-*:

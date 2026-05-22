@@ -1,0 +1,25 @@
+diff --git a/src/shadowbox/Taskfile.yml b/src/shadowbox/Taskfile.yml
+index fb72a9b8..3198265 100644
+--- a/src/shadowbox/Taskfile.yml
++++ b/src/shadowbox/Taskfile.yml
+@@ -85,6 +85,8 @@ tasks:
+             "arm64" "node@sha256:b4b7a1dd149c65ee6025956ac065a843b4409a62068bd2b0cbafbb30ca2fab3b"
+           ) .TARGET_ARCH
+         }}'
++      DOCKER_BUILD_COMMAND: '{{.DOCKER_BUILD_COMMAND | default "build"}}'
++      DOCKER_BUILD_ARGS: '{{.DOCKER_BUILD_ARGS | default ""}}'
+     env:
+       DOCKER_CONTENT_TRUST: '{{.DOCKER_CONTENT_TRUST | default "1"}}'
+       # Enable Docker BuildKit (https://docs.docker.com/develop/develop-images/build_enhancements)
+@@ -102,9 +104,10 @@ tasks:
+       - cp '{{joinPath .TASKFILE_DIR "docker/cmd.sh"}}' '{{.IMAGE_ROOT}}/'
+       # Build image with given root
+       - |
+-        "${DOCKER:-docker}" build --force-rm \
++        "${DOCKER:-docker}" {{.DOCKER_BUILD_COMMAND}} --force-rm \
+           --build-arg NODE_IMAGE='{{.NODE_IMAGE}}' \
+           --build-arg VERSION='{{.VERSION}}' \
++          {{.DOCKER_BUILD_ARGS}} \
+           -f '{{joinPath .TASKFILE_DIR "docker" "Dockerfile"}}' \
+           -t '{{.IMAGE_NAME}}' \
+           '{{.IMAGE_ROOT}}'
