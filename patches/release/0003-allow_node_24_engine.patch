@@ -1,0 +1,24 @@
+diff --git a/package-lock.json b/package-lock.json
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -34,7 +34,7 @@
+         "webpack-cli": "^5.1.4"
+       },
+       "engines": {
+-        "node": "18.x.x"
++        "node": "18.x.x || 24.x.x"
+       }
+     },
+     "node_modules/@aashutoshrathi/word-wrap": {
+diff --git a/package.json b/package.json
+--- a/package.json
++++ b/package.json
+@@ -29,7 +29,7 @@
+     "postinstall": "go build github.com/go-task/task/v3/cmd/task"
+   },
+   "engines": {
+-    "node": "18.x.x"
++    "node": "18.x.x || 24.x.x"
+   },
+   "workspaces": [
+     "src/*"

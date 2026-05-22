@@ -48,8 +48,8 @@ Requirements:
 - `git`
 - `curl`
 - `jq`
-- Node.js 18 with `npm`
-- Go 1.21 or newer
+- Node.js 18 or 24 with `npm`
+- Go version required by the selected upstream checkout; current upstream `master` requires Go 1.26.3 or newer
 - Docker with Buildx and BuildKit support
 - QEMU/binfmt support for cross-architecture Docker builds
 

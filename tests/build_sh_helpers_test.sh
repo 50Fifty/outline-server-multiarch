@@ -140,6 +140,60 @@ test_latest_release_tag_uses_github_token() {
   fi
 }
 
+test_check_tooling_accepts_node_18() {
+  (
+    require_command() { :; }
+    node() {
+      if [[ "$1" == "-p" ]]; then
+        printf '18\n'
+      else
+        printf 'v18.0.0\n'
+      fi
+    }
+
+    check_tooling
+  )
+}
+
+test_check_tooling_accepts_node_24() {
+  (
+    require_command() { :; }
+    node() {
+      if [[ "$1" == "-p" ]]; then
+        printf '24\n'
+      else
+        printf 'v24.0.0\n'
+      fi
+    }
+
+    check_tooling
+  )
+}
+
+test_check_tooling_rejects_other_node_majors() {
+  local out="${TEST_TMP_DIR}/check-tooling.out"
+  local err="${TEST_TMP_DIR}/check-tooling.err"
+
+  if (
+    require_command() { :; }
+    node() {
+      if [[ "$1" == "-p" ]]; then
+        printf '20\n'
+      else
+        printf 'v20.0.0\n'
+      fi
+    }
+
+    check_tooling
+  ) >"${out}" 2>"${err}"; then
+    fail "check_tooling should reject unsupported Node.js majors"
+  fi
+
+  if ! grep -q "Node.js 18.x or 24.x is required by this build" "${err}"; then
+    fail "unsupported Node.js error message was not clear"
+  fi
+}
+
 test_reject_digest_image_ref() {
   local out="${TEST_TMP_DIR}/reject-digest.out"
   local err="${TEST_TMP_DIR}/reject-digest.err"
@@ -203,6 +257,9 @@ test_source_preserves_existing_exit_trap
 test_append_tag_suffix_tagged_image
 test_append_tag_suffix_rejects_digest_image
 test_latest_release_tag_uses_github_token
+test_check_tooling_accepts_node_18
+test_check_tooling_accepts_node_24
+test_check_tooling_rejects_other_node_majors
 test_reject_digest_image_ref
 test_main_rejects_digest_before_tooling
 test_apply_patches_rejects_missing_patch_dir
