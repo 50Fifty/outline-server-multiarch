@@ -66,6 +66,7 @@ jobs:
   build_master:
     needs: [test, version]
     runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/master'
     permissions:
       contents: read
       packages: write
@@ -97,7 +98,9 @@ jobs:
   build_latest:
     needs: [test, version]
     runs-on: ubuntu-latest
-    if: needs.version.outputs.is_latest_build_required == 'true'
+    if: >
+      (github.event_name == 'push' && github.ref == 'refs/heads/master') ||
+      (github.event_name == 'schedule' && needs.version.outputs.is_latest_build_required == 'true')
     permissions:
       contents: write
       packages: write
@@ -129,6 +132,7 @@ jobs:
         run: |
           bash ./build.sh "${{env.ARCH}}" "${{env.PACKAGE_NAME}}:latest" "${{needs.version.outputs.remote_tag}}"
       - name: Conditional release
+        if: needs.version.outputs.is_latest_build_required == 'true'
         env:
           GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
         run: |
