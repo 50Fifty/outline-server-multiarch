@@ -76,15 +76,23 @@ test_checkout_target_prefers_origin_branch() {
 }
 
 test_build_version_strips_server_release_prefix() {
+  local previous_checkpoint
+
+  previous_checkpoint="${CHECKPOINT}"
   CHECKPOINT="server-v1.12.3"
 
   assert_eq "1.12.3" "$(build_version)" "server release version"
+  CHECKPOINT="${previous_checkpoint}"
 }
 
 test_build_version_keeps_plain_semver_checkpoint() {
+  local previous_checkpoint
+
+  previous_checkpoint="${CHECKPOINT}"
   CHECKPOINT="1.12.3"
 
   assert_eq "1.12.3" "$(build_version)" "plain semver checkpoint"
+  CHECKPOINT="${previous_checkpoint}"
 }
 
 test_build_version_master_uses_semver_prerelease() {
