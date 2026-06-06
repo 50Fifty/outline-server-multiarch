@@ -274,11 +274,32 @@ install_dependencies() {
   )
 }
 
+normalize_server_version() {
+  local version="$1"
+
+  version="${version#server-v}"
+  version="${version#v}"
+  printf '%s\n' "${version}"
+}
+
+latest_local_server_version() {
+  local tag
+
+  tag="$(git -C "${CHECKOUT_DIR}" tag --list 'server-v[0-9]*' --sort=-v:refname | head -n 1)"
+  if [[ -z "${tag}" ]]; then
+    printf '1.6.0\n'
+    return
+  fi
+  normalize_server_version "${tag}"
+}
+
 build_version() {
   if [[ "${CHECKPOINT}" == "master" ]]; then
-    printf 'master-%s' "$(git -C "${CHECKOUT_DIR}" rev-parse --short HEAD)"
+    printf '%s-master.g%s' \
+      "$(latest_local_server_version)" \
+      "$(git -C "${CHECKOUT_DIR}" rev-parse --short HEAD)"
   else
-    printf '%s' "${CHECKPOINT}"
+    normalize_server_version "${CHECKPOINT}"
   fi
 }
 
