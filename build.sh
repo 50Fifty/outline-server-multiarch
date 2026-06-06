@@ -279,15 +279,19 @@ normalize_server_version() {
 
   version="${version#server-v}"
   version="${version#v}"
-  printf '%s\n' "${version}"
+  printf '%s' "${version}"
 }
 
 latest_local_server_version() {
   local tag
 
-  tag="$(git -C "${CHECKOUT_DIR}" tag --list 'server-v[0-9]*' --sort=-v:refname | head -n 1)"
+  tag="$(git -C "${CHECKOUT_DIR}" for-each-ref \
+    --count=1 \
+    --sort=-v:refname \
+    --format='%(refname:short)' \
+    'refs/tags/server-v[0-9]*')"
   if [[ -z "${tag}" ]]; then
-    printf '1.6.0\n'
+    printf '0.0.0'
     return
   fi
   normalize_server_version "${tag}"
