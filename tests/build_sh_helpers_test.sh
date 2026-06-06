@@ -75,6 +75,110 @@ test_checkout_target_prefers_origin_branch() {
   CHECKOUT_DIR="${previous_checkout_dir}"
 }
 
+test_build_version_strips_server_release_prefix() {
+  local previous_checkpoint
+
+  previous_checkpoint="${CHECKPOINT}"
+  CHECKPOINT="server-v1.12.3"
+
+  assert_eq "1.12.3" "$(build_version)" "server release version"
+  CHECKPOINT="${previous_checkpoint}"
+}
+
+test_build_version_keeps_plain_semver_checkpoint() {
+  local previous_checkpoint
+
+  previous_checkpoint="${CHECKPOINT}"
+  CHECKPOINT="1.12.3"
+
+  assert_eq "1.12.3" "$(build_version)" "plain semver checkpoint"
+  CHECKPOINT="${previous_checkpoint}"
+}
+
+test_build_version_strips_v_prefix_from_semver_checkpoint() {
+  local previous_checkpoint
+
+  previous_checkpoint="${CHECKPOINT}"
+  CHECKPOINT="v1.12.3"
+
+  assert_eq "1.12.3" "$(build_version)" "v-prefixed semver checkpoint"
+  CHECKPOINT="${previous_checkpoint}"
+}
+
+test_build_version_keeps_non_version_v_prefix() {
+  local previous_checkpoint
+
+  previous_checkpoint="${CHECKPOINT}"
+  CHECKPOINT="vault"
+
+  assert_eq "vault" "$(build_version)" "non-version v-prefixed checkpoint"
+  CHECKPOINT="${previous_checkpoint}"
+}
+
+test_build_version_release_output_has_no_trailing_newline() {
+  local actual
+  local expected
+  local previous_checkpoint
+
+  actual="${TEST_TMP_DIR}/build-version-release.actual"
+  expected="${TEST_TMP_DIR}/build-version-release.expected"
+  previous_checkpoint="${CHECKPOINT}"
+  CHECKPOINT="server-v1.12.3"
+
+  build_version >"${actual}"
+  printf '1.12.3' >"${expected}"
+  if ! cmp -s "${expected}" "${actual}"; then
+    fail "release build version should not include a trailing newline"
+  fi
+  CHECKPOINT="${previous_checkpoint}"
+}
+
+test_build_version_master_uses_semver_prerelease() {
+  local repo
+  local previous_checkout_dir
+  local previous_checkpoint
+  local expected_sha
+
+  repo="$(mktemp -d "${TEST_TMP_DIR}/repo.XXXXXX")"
+  previous_checkout_dir="${CHECKOUT_DIR}"
+  previous_checkpoint="${CHECKPOINT}"
+  git -C "${repo}" init -q
+  git -C "${repo}" config user.email "test@example.com"
+  git -C "${repo}" config user.name "Test User"
+  git -C "${repo}" commit --allow-empty -q -m "initial"
+  git -C "${repo}" tag server-v1.10.0
+  git -C "${repo}" tag server-v1.12.3
+  expected_sha="$(git -C "${repo}" rev-parse --short HEAD)"
+
+  CHECKOUT_DIR="${repo}"
+  CHECKPOINT="master"
+  assert_eq "1.12.3-master.g${expected_sha}" "$(build_version)" "master semver prerelease version"
+  CHECKOUT_DIR="${previous_checkout_dir}"
+  CHECKPOINT="${previous_checkpoint}"
+}
+
+test_build_version_master_without_tags_uses_neutral_base() {
+  local repo
+  local previous_checkout_dir
+  local previous_checkpoint
+  local expected_sha
+
+  repo="$(mktemp -d "${TEST_TMP_DIR}/repo.XXXXXX")"
+  previous_checkout_dir="${CHECKOUT_DIR}"
+  previous_checkpoint="${CHECKPOINT}"
+  git -C "${repo}" init -q
+  git -C "${repo}" config user.email "test@example.com"
+  git -C "${repo}" config user.name "Test User"
+  git -C "${repo}" commit --allow-empty -q -m "initial"
+  expected_sha="$(git -C "${repo}" rev-parse --short HEAD)"
+
+  CHECKOUT_DIR="${repo}"
+  CHECKPOINT="master"
+  assert_eq "0.0.0-master.g${expected_sha}" "$(build_version)" "master tagless prerelease version"
+  CHECKOUT_DIR="${previous_checkout_dir}"
+  CHECKPOINT="${previous_checkpoint}"
+}
+
 test_no_hard_coded_build_sh_tmp_paths() {
   local fixed_tmp_pattern
   fixed_tmp_pattern='/tmp/build'"_sh_"
@@ -252,6 +356,13 @@ test_platform_to_target_arch_master_arm64
 test_split_platforms_trims_whitespace
 test_split_platforms_rejects_empty_entry
 test_checkout_target_prefers_origin_branch
+test_build_version_strips_server_release_prefix
+test_build_version_keeps_plain_semver_checkpoint
+test_build_version_strips_v_prefix_from_semver_checkpoint
+test_build_version_keeps_non_version_v_prefix
+test_build_version_release_output_has_no_trailing_newline
+test_build_version_master_uses_semver_prerelease
+test_build_version_master_without_tags_uses_neutral_base
 test_no_hard_coded_build_sh_tmp_paths
 test_source_preserves_existing_exit_trap
 test_append_tag_suffix_tagged_image
