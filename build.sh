@@ -278,7 +278,9 @@ normalize_server_version() {
   local version="$1"
 
   version="${version#server-v}"
-  version="${version#v}"
+  if [[ "${version}" =~ ^v[0-9] ]]; then
+    version="${version#v}"
+  fi
   printf '%s' "${version}"
 }
 

@@ -95,6 +95,26 @@ test_build_version_keeps_plain_semver_checkpoint() {
   CHECKPOINT="${previous_checkpoint}"
 }
 
+test_build_version_strips_v_prefix_from_semver_checkpoint() {
+  local previous_checkpoint
+
+  previous_checkpoint="${CHECKPOINT}"
+  CHECKPOINT="v1.12.3"
+
+  assert_eq "1.12.3" "$(build_version)" "v-prefixed semver checkpoint"
+  CHECKPOINT="${previous_checkpoint}"
+}
+
+test_build_version_keeps_non_version_v_prefix() {
+  local previous_checkpoint
+
+  previous_checkpoint="${CHECKPOINT}"
+  CHECKPOINT="vault"
+
+  assert_eq "vault" "$(build_version)" "non-version v-prefixed checkpoint"
+  CHECKPOINT="${previous_checkpoint}"
+}
+
 test_build_version_release_output_has_no_trailing_newline() {
   local actual
   local expected
@@ -338,6 +358,8 @@ test_split_platforms_rejects_empty_entry
 test_checkout_target_prefers_origin_branch
 test_build_version_strips_server_release_prefix
 test_build_version_keeps_plain_semver_checkpoint
+test_build_version_strips_v_prefix_from_semver_checkpoint
+test_build_version_keeps_non_version_v_prefix
 test_build_version_release_output_has_no_trailing_newline
 test_build_version_master_uses_semver_prerelease
 test_build_version_master_without_tags_uses_neutral_base
